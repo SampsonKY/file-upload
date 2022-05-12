@@ -41,21 +41,43 @@ const App: React.FC = () => {
     return fileChunkList;
   };
 
-  //? 4. 增量计算文件hash值
-  const calculateHash = (fileChunkList): Promise<string> => {
-    return new Promise((resolve) => {
-      // 添加 worker 属性
-      const worker = new Worker('/hash.js');
-      worker.postMessage({ fileChunkList });
-      worker.onmessage = (e) => {
-        const { percentage, fileHash } = e.data;
-        setHashPercent(percentage);
-        if (fileHash) {
-          resolve(fileHash);
+  //? 4. 增量计算文件hash值，影分身 hash，取文件头尾2M，以2M为切片大小取前中后各100k计算
+  const calculateHashSample = ():Promise<string> => {
+    return new Promise(resolve => {
+      // @ts-ignore
+      const spark = new window.SparkMD5.ArrayBuffer();
+      const reader = new FileReader();
+
+      // 文件大小
+      const size = file.size;
+      const offset = 2 * 1024 * 1024;
+
+      let chunks = [file.slice(0, offset)];
+      
+      let cur = offset;
+      while(cur < size) {
+        // 最后一块全部加载进来
+        if (cur + offset >= size) {
+          chunks.push(file.slice(cur, cur+offset));
+        } else {
+          const mid = cur + offset / 2;
+          const end = cur + offset;
+          chunks.push(file.slice(cur, cur+2));
+          chunks.push(file.slice(mid, mid+2));
+          chunks.push(file.slice(end-2, end));
         }
-      };
-    });
-  };
+        cur += offset;
+      }
+
+      // 拼接
+      reader.readAsArrayBuffer(new Blob(chunks));
+      reader.onload = e => {
+        spark.append(e.target.result);
+        setHashPercent(100);
+        resolve(spark.end());
+      }
+    })
+  }
 
   //? 5. 判断文件是否已经上传，根据内容 hash 判断
   const verifyUpload = async (filename, fileHash) => {
@@ -73,6 +95,43 @@ const App: React.FC = () => {
     return JSON.parse(result.data);
   };
 
+  //? 并发控制
+  const sendRequest = async (forms, max=4) => {
+    return new Promise((resolve) => {
+      const len = forms.length;
+      let idx = 0;
+      let counter = 0;
+
+      const start = async () => {
+        // 有请求，有通道
+        while(idx < len && max > 0) {
+          max--; // 占用通道
+          const form = forms[idx].formData;
+          const index = forms[idx].index;
+          idx++;
+
+          request({
+            url: 'http://localhost:3000/',
+            method: 'post',
+            data: form,
+            onProgress: createProcessHandler(index),
+            xhrList,
+            callback: xhrCallback,
+          }).then(() => {
+            max++; // 释放通道
+            counter++;
+            if (counter === len) {
+              resolve(null);
+            } else {
+              start();
+            }
+          })
+        }
+      }
+      start();
+    })
+  }
+
   //? 6.上传切片
   const uploadChunks = async (chunks, fileHash, uploadedList = []) => {
     const requestList = chunks
@@ -86,18 +145,8 @@ const App: React.FC = () => {
         formData.append('filename', file.name);
         return { formData, index };
       })
-      .map(async ({ formData, index }) => {
-        return await request({
-          url: 'http://localhost:3000/',
-          method: 'post',
-          data: formData,
-          onProgress: createProcessHandler(index),
-          xhrList,
-          callback: xhrCallback,
-        });
-      });
 
-    await Promise.all(requestList); // 并发上传
+    await sendRequest(requestList, 4); // 并发上传
 
     // 之前的切片数 + 本次上传切片数 = 所有切片数时
     // 合并切片
@@ -126,7 +175,7 @@ const App: React.FC = () => {
   const handleUpload = async () => {
     if (!file) return;
     const fileChunkList = createFileChunk();
-    const fileHash = await calculateHash(fileChunkList);
+    const fileHash = await calculateHashSample();
     setHash(fileHash);
     const { shouldUpload, uploadedList } = await verifyUpload(file.name, fileHash);
     if (!shouldUpload) {
