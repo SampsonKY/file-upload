@@ -42,20 +42,40 @@ const App: React.FC = () => {
   };
 
   //? 4. 增量计算文件hash值
-  const calculateHash = (fileChunkList): Promise<string> => {
-    return new Promise((resolve) => {
-      // 添加 worker 属性
-      const worker = new Worker('/hash.js');
-      worker.postMessage({ fileChunkList });
-      worker.onmessage = (e) => {
-        const { percentage, fileHash } = e.data;
-        setHashPercent(percentage);
-        if (fileHash) {
-          resolve(fileHash);
-        }
+  const calculateHashIdle = (chunks):Promise<string> => {
+    return new Promise(resolve => {
+      // @ts-ignore
+      const spark = new window.SparkMD5.ArrayBuffer();
+      let count = 0;
+      // 根据文件内容追加计算
+      const appendToSpark = async file => {
+        return new Promise(resolve => {
+          const reader = new FileReader();
+          reader.readAsArrayBuffer(file);
+          reader.onload = e => {
+            spark.append(e.target.result);
+            resolve(null);
+          }
+        })
       };
-    });
-  };
+
+      const workLoop = async deadline => {
+        // 有任务，且当前帧还没结束
+        while (count < chunks.length && deadline.timeRemaining() > 1) {
+          await appendToSpark(chunks[count].file);
+          count++
+          if (count < chunks.length) {
+            setHashPercent(Number(((100 * count) / chunks.length).toFixed(2)));
+          } else {
+            setHashPercent(100);
+            resolve(spark.end());
+          }
+          window.requestIdleCallback(workLoop);
+        };
+      }
+      window.requestIdleCallback(workLoop);
+    })
+  }
 
   //? 5. 判断文件是否已经上传，根据内容 hash 判断
   const verifyUpload = async (filename, fileHash) => {
@@ -126,7 +146,7 @@ const App: React.FC = () => {
   const handleUpload = async () => {
     if (!file) return;
     const fileChunkList = createFileChunk();
-    const fileHash = await calculateHash(fileChunkList);
+    const fileHash = await calculateHashIdle(fileChunkList);
     setHash(fileHash);
     const { shouldUpload, uploadedList } = await verifyUpload(file.name, fileHash);
     if (!shouldUpload) {
