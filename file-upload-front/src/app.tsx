@@ -41,39 +41,41 @@ const App: React.FC = () => {
     return fileChunkList;
   };
 
-  //? 4. 增量计算文件hash值
-  const calculateHashIdle = (chunks):Promise<string> => {
+  //? 4. 增量计算文件hash值，影分身 hash，取文件头尾2M，以2M为切片大小取前中后各100k计算
+  const calculateHashSample = ():Promise<string> => {
     return new Promise(resolve => {
       // @ts-ignore
       const spark = new window.SparkMD5.ArrayBuffer();
-      let count = 0;
-      // 根据文件内容追加计算
-      const appendToSpark = async file => {
-        return new Promise(resolve => {
-          const reader = new FileReader();
-          reader.readAsArrayBuffer(file);
-          reader.onload = e => {
-            spark.append(e.target.result);
-            resolve(null);
-          }
-        })
-      };
+      const reader = new FileReader();
 
-      const workLoop = async deadline => {
-        // 有任务，且当前帧还没结束
-        while (count < chunks.length && deadline.timeRemaining() > 1) {
-          await appendToSpark(chunks[count].file);
-          count++
-          if (count < chunks.length) {
-            setHashPercent(Number(((100 * count) / chunks.length).toFixed(2)));
-          } else {
-            setHashPercent(100);
-            resolve(spark.end());
-          }
-          window.requestIdleCallback(workLoop);
-        };
+      // 文件大小
+      const size = file.size;
+      const offset = 2 * 1024 * 1024;
+
+      let chunks = [file.slice(0, offset)];
+      
+      let cur = offset;
+      while(cur < size) {
+        // 最后一块全部加载进来
+        if (cur + offset >= size) {
+          chunks.push(file.slice(cur, cur+offset));
+        } else {
+          const mid = cur + offset / 2;
+          const end = cur + offset;
+          chunks.push(file.slice(cur, cur+2));
+          chunks.push(file.slice(mid, mid+2));
+          chunks.push(file.slice(end-2, end));
+        }
+        cur += offset;
       }
-      window.requestIdleCallback(workLoop);
+
+      // 拼接
+      reader.readAsArrayBuffer(new Blob(chunks));
+      reader.onload = e => {
+        spark.append(e.target.result);
+        setHashPercent(100);
+        resolve(spark.end());
+      }
     })
   }
 
@@ -146,7 +148,7 @@ const App: React.FC = () => {
   const handleUpload = async () => {
     if (!file) return;
     const fileChunkList = createFileChunk();
-    const fileHash = await calculateHashIdle(fileChunkList);
+    const fileHash = await calculateHashSample();
     setHash(fileHash);
     const { shouldUpload, uploadedList } = await verifyUpload(file.name, fileHash);
     if (!shouldUpload) {
