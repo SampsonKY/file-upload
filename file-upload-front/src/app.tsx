@@ -95,6 +95,43 @@ const App: React.FC = () => {
     return JSON.parse(result.data);
   };
 
+  //? 并发控制
+  const sendRequest = async (forms, max=4) => {
+    return new Promise((resolve) => {
+      const len = forms.length;
+      let idx = 0;
+      let counter = 0;
+
+      const start = async () => {
+        // 有请求，有通道
+        while(idx < len && max > 0) {
+          max--; // 占用通道
+          const form = forms[idx].formData;
+          const index = forms[idx].index;
+          idx++;
+
+          request({
+            url: 'http://localhost:3000/',
+            method: 'post',
+            data: form,
+            onProgress: createProcessHandler(index),
+            xhrList,
+            callback: xhrCallback,
+          }).then(() => {
+            max++; // 释放通道
+            counter++;
+            if (counter === len) {
+              resolve(null);
+            } else {
+              start();
+            }
+          })
+        }
+      }
+      start();
+    })
+  }
+
   //? 6.上传切片
   const uploadChunks = async (chunks, fileHash, uploadedList = []) => {
     const requestList = chunks
@@ -108,18 +145,8 @@ const App: React.FC = () => {
         formData.append('filename', file.name);
         return { formData, index };
       })
-      .map(async ({ formData, index }) => {
-        return await request({
-          url: 'http://localhost:3000/',
-          method: 'post',
-          data: formData,
-          onProgress: createProcessHandler(index),
-          xhrList,
-          callback: xhrCallback,
-        });
-      });
 
-    await Promise.all(requestList); // 并发上传
+    await sendRequest(requestList, 4); // 并发上传
 
     // 之前的切片数 + 本次上传切片数 = 所有切片数时
     // 合并切片
